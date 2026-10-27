@@ -4,6 +4,7 @@ import { PromData, type ChatMessage } from '../services/prom.service';
 
 type Candidate = Record<string, string>;
 const HISTORY_KEY = 'agente-periferia-history-v1';
+const REQUIRED_EXCEL_FIELDS = ['nombre', 'cargo', 'habilidades', 'industria'] as const;
 
 function buildChatPrompt(history: ChatMessage[], message: string) {
   const conversation = history.map(({ role, content }) =>
@@ -14,11 +15,14 @@ function buildChatPrompt(history: ChatMessage[], message: string) {
 }
 
 function linkedinSearch(candidate: Candidate) {
-  const role = candidate.cargo ?? candidate.perfil ?? candidate.titulo ?? '';
-  const skills = candidate.habilidades ?? candidate.skills ?? '';
-  const sector = candidate.sector ?? candidate.industria ?? '';
-  const keywords = ['cliente', role, skills, sector].filter(Boolean).join(' ');
-  return `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}`;
+  const role = candidate.cargo ?? '';
+  const skills = candidate.habilidades ?? '';
+  const keywords = [role, skills].filter(Boolean).join(',');
+  return `https://www.linkedin.com/jobs/search-results/?keywords=${encodeURIComponent(keywords)}&origin=JOBS_HOME_SEARCH_BUTTON`;
+}
+
+function periferiaJobSearch(candidate: Candidate) {
+  return `https://jobs.periferiaitgroup.com/jobs?query=${encodeURIComponent(candidate.habilidades ?? '')}`;
 }
 
 export const Generate = () => {
@@ -43,15 +47,30 @@ export const Generate = () => {
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const [headers = []] = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, blankrows: false });
+      const fields = headers
+        .map((header) => String(header).trim().toLowerCase())
+        .filter(Boolean);
+      const missingFields = REQUIRED_EXCEL_FIELDS.filter((field) => !fields.includes(field));
+      const extraFields = fields.filter((field) => !REQUIRED_EXCEL_FIELDS.includes(field as typeof REQUIRED_EXCEL_FIELDS[number]));
+
+      if (missingFields.length || extraFields.length) {
+        const details = [
+          missingFields.length && `Campos faltantes: ${missingFields.join(', ')}.`,
+          extraFields.length && `Campos sobrantes: ${extraFields.join(', ')}.`,
+        ].filter(Boolean).join(' ');
+        setFileError(`El Excel debe contener únicamente las columnas: ${REQUIRED_EXCEL_FIELDS.join(', ')}. ${details}`);
+        return;
+      }
+
       const rows = XLSX.utils.sheet_to_json<Candidate>(sheet, { defval: '' });
       if (!rows.length) { setFileError('El Excel no contiene filas de candidatos.'); return; }
       const normalized = rows.map((row) => Object.fromEntries(
         Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), String(value).trim()]),
       ));
-      const valid = normalized.filter((row) => (row.nombre || row.name)
-        && (row.cargo || row.perfil || row.titulo || row.habilidades || row.skills || row.sector || row.industria));
-      if (!valid.length) { setFileError('No encontré candidatos con nombre y al menos un dato de cargo, habilidades o sector.'); return; }
-      if (valid.length < normalized.length) setFileError(`${normalized.length - valid.length} filas omitidas: requieren nombre y cargo, habilidades o sector.`);
+      const valid = normalized.filter((row) => REQUIRED_EXCEL_FIELDS.every((field) => row[field]));
+      if (!valid.length) { setFileError('No encontré candidatos con todos los campos requeridos: nombre, cargo, habilidades e industria.'); return; }
+      if (valid.length < normalized.length) setFileError(`${normalized.length - valid.length} filas omitidas: deben completar nombre, cargo, habilidades e industria.`);
       setCandidates(valid);
       console.log('[Excel_periferia] Candidatos validados:', valid);
     } catch {
@@ -106,10 +125,13 @@ export const Generate = () => {
       {fileError && <p role="alert" className="text-red-300">{fileError}</p>}
       {candidates.length > 0 && <section className="rounded-2xl bg-[#303030] p-4">
         <h3 className="mb-2 font-semibold">{candidates.length} candidatos validados</h3>
-        <p className="mb-3 text-sm text-gray-300">Los datos también están en la consola del navegador. Abre LinkedIn para revisar coincidencias manualmente.</p>
+        <p className="mb-3 text-sm text-gray-300">Los datos también están en la consola del navegador. Consulta las vacantes relacionadas en LinkedIn o Periferia.</p>
         <ul className="space-y-2">{candidates.map((candidate, index) => <li key={index} className="flex items-center justify-between gap-3">
           <span>{candidate.nombre ?? candidate.name} {candidate.cargo || candidate.perfil ? `— ${candidate.cargo ?? candidate.perfil}` : ''}</span>
-          <a className="shrink-0 text-blue-300 underline" href={linkedinSearch(candidate)} target="_blank" rel="noreferrer">Buscar en LinkedIn</a>
+          <div className="flex shrink-0 gap-3">
+            <a className="text-blue-300 underline" href={linkedinSearch(candidate)} target="_blank" rel="noreferrer">Buscar empleos en LinkedIn</a>
+            <a className="text-blue-300 underline" href={periferiaJobSearch(candidate)} target="_blank" rel="noreferrer">Vacante Periferia</a>
+          </div>
         </li>)}</ul>
       </section>}
       {busy && <p className="text-sm text-gray-400">Generando respuesta...</p>}
